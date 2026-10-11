@@ -34,25 +34,35 @@ jobs:
           gh release download v1 --pattern "base.apk" --repo locquach700-del/supreme-mod --dir . --clobber
           ls -lh base.apk
 
-      - name: Decompile APK
+      - name: Inspect base APK
         run: |
+          echo "--- libs ---"
+          unzip -l base.apk | grep "lib/" || echo "no libs"
+          echo "--- manifest snippet ---"
           ./apktool d base.apk -o decompiled -f
+          grep -o 'android:extractNativeLibs="[^"]*"' decompiled/AndroidManifest.xml || echo "extractNativeLibs: not set"
+          echo "--- minSdk ---"
+          grep -E "minSdkVersion|targetSdkVersion" decompiled/apktool.yml
 
-      - name: Ensure extractNativeLibs
+      - name: Force arm64 only
         run: |
-          MANIFEST=decompiled/AndroidManifest.xml
-          if ! grep -q 'android:extractNativeLibs' "$MANIFEST"; then
-            sed -i 's/<application /<application android:extractNativeLibs="true" /' "$MANIFEST"
-          else
-            sed -i 's/android:extractNativeLibs="[^"]*"/android:extractNativeLibs="true"/' "$MANIFEST"
+          # Xóa mọi ABI không phải arm64-v8a để tránh lệch kiến trúc
+          if [ -d decompiled/lib ]; then
+            for d in decompiled/lib/*; do
+              if [ "$(basename "$d")" != "arm64-v8a" ]; then
+                echo "removing $d"
+                rm -rf "$d"
+              fi
+            done
           fi
+          mkdir -p decompiled/lib/arm64-v8a
 
-      - name: Download Frida Gadget
+      - name: Download Frida Gadget (arm64)
         run: |
           wget https://github.com/frida/frida/releases/download/16.5.9/frida-gadget-16.5.9-android-arm64.so.xz
           unxz frida-gadget-16.5.9-android-arm64.so.xz
-          if [ ! -d decompiled/lib/arm64-v8a ]; then mkdir -p decompiled/lib/arm64-v8a; fi
           mv frida-gadget-16.5.9-android-arm64.so decompiled/lib/arm64-v8a/libfrida-gadget.so
+          ls -lh decompiled/lib/arm64-v8a/
 
       - name: Copy mod.js and config
         run: |
@@ -65,6 +75,16 @@ jobs:
             }
           }
           EOF
+
+      - name: Raise minSdk if needed
+        run: |
+          YML=decompiled/apktool.yml
+          MIN=$(grep -oE 'minSdkVersion: [0-9]+' "$YML" | grep -oE '[0-9]+' || echo 0)
+          echo "current minSdk: $MIN"
+          if [ "$MIN" -lt 21 ]; then
+            sed -i 's/minSdkVersion: .*/minSdkVersion: 21/' "$YML"
+            echo "raised to 21"
+          fi
 
       - name: Patch smali to load Frida Gadget
         run: |
@@ -80,17 +100,26 @@ jobs:
             exit 1
           fi
           echo "Patching: $SMALI_FILE"
-          sed -i '/invoke-super {p0, p1}, Landroid\/app\/Activity;->onCreate(Landroid\/os\/Bundle;)V/a \
+          # Tránh patch đè nếu chạy lại
+          if grep -q 'frida-gadget' "$SMALI_FILE"; then
+            echo "already patched"
+          else
+            sed -i '/invoke-super {p0, p1}, Landroid\/app\/Activity;->onCreate(Landroid\/os\/Bundle;)V/a \
               const-string v0, "frida-gadget"\n\
               invoke-static {v0}, Ljava/lang/System;->loadLibrary(Ljava/lang/String;)V' "$SMALI_FILE"
+          fi
 
       - name: Rebuild APK
         run: |
           ./apktool b decompiled -o modded-unsigned.apk
+          ls -lh modded-unsigned.apk
 
-      - name: Sign APK
+      - name: Zipalign and Sign APK (v1+v2)
         run: |
-          java -jar uber-apk-signer.jar -a modded-unsigned.apk --out modded
+          sudo apt-get install -y zipalign || true
+          # uber-apk-signer tự zipalign + ký v1+v2
+          java -jar uber-apk-signer.jar -a modded-unsigned.apk --out modded --allowResign -v1SigningEnabled true -v2SigningEnabled true
+          ls -lh modded/
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
