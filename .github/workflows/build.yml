@@ -34,19 +34,16 @@ jobs:
           gh release download v1 --pattern "base.apk" --repo locquach700-del/supreme-mod --dir . --clobber
           ls -lh base.apk
 
-      - name: Inspect base APK
+      - name: Inspect and decompile APK
         run: |
           echo "--- libs ---"
           unzip -l base.apk | grep "lib/" || echo "no libs"
-          echo "--- manifest snippet ---"
           ./apktool d base.apk -o decompiled -f
           grep -o 'android:extractNativeLibs="[^"]*"' decompiled/AndroidManifest.xml || echo "extractNativeLibs: not set"
-          echo "--- minSdk ---"
           grep -E "minSdkVersion|targetSdkVersion" decompiled/apktool.yml
 
       - name: Force arm64 only
         run: |
-          # Xóa mọi ABI không phải arm64-v8a để tránh lệch kiến trúc
           if [ -d decompiled/lib ]; then
             for d in decompiled/lib/*; do
               if [ "$(basename "$d")" != "arm64-v8a" ]; then
@@ -100,7 +97,6 @@ jobs:
             exit 1
           fi
           echo "Patching: $SMALI_FILE"
-          # Tránh patch đè nếu chạy lại
           if grep -q 'frida-gadget' "$SMALI_FILE"; then
             echo "already patched"
           else
@@ -114,11 +110,9 @@ jobs:
           ./apktool b decompiled -o modded-unsigned.apk
           ls -lh modded-unsigned.apk
 
-      - name: Zipalign and Sign APK (v1+v2)
+      - name: Sign APK
         run: |
-          sudo apt-get install -y zipalign || true
-          # uber-apk-signer tự zipalign + ký v1+v2
-          java -jar uber-apk-signer.jar -a modded-unsigned.apk --out modded --allowResign -v1SigningEnabled true -v2SigningEnabled true
+          java -jar uber-apk-signer.jar -a modded-unsigned.apk --out modded --allowResign --verbose
           ls -lh modded/
 
       - name: Upload Artifact
